@@ -121,8 +121,8 @@ static class Discovery
             var reply = new byte[7 + n];
             BinaryPrimitives.WriteInt32BigEndian(reply, Proto.DiscMagic);
             reply[4] = 2;
-            reply[5] = (byte)(Proto.Port >> 8);
-            reply[6] = (byte)Proto.Port;
+            reply[5] = (byte)((Proto.Port >> 8) & 0xFF);
+            reply[6] = (byte)(Proto.Port & 0xFF);
             Array.Copy(nameBytes, 0, reply, 7, n);
 
             while (!ct.IsCancellationRequested)

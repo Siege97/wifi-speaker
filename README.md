@@ -32,6 +32,20 @@ Um único app, dois modos:
 
 Para encerrar, toque em **Parar** em cada celular.
 
+## Programa para Windows
+
+A pasta `windows/` tem a versão para PC, com os mesmos dois modos e o mesmo protocolo,
+então ela conversa com o app do celular:
+
+- **Transmissor (PC para celular):** envia o som que está tocando no PC ao celular antigo,
+  que toca pela saída P2. No PC, digite o IP mostrado no receptor do celular.
+- **Receptor (celular para PC):** toca nas caixas do PC o som enviado pelo transmissor
+  do celular novo. Digite no celular o IP que o programa mostra.
+
+Para obter o `.exe`: aba **Actions** > **Build Windows** > execução mais recente >
+artefato **wifi-speaker-windows**. Ele roda sem instalar nada. Na primeira vez que
+iniciar o receptor, permita o acesso no firewall do Windows (redes privadas).
+
 ## Limitações
 
 - A captura de áudio só funciona com apps que permitem ser capturados. Alguns apps

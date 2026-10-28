@@ -1,0 +1,23 @@
+name: Build Windows
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Publicar WifiSpeaker.exe
+        run: dotnet publish windows/WifiSpeaker.csproj -c Release -o out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wifi-speaker-windows
+          path: out/WifiSpeaker.exe

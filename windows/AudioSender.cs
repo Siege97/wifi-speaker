@@ -5,41 +5,130 @@ using NAudio.Wave;
 
 namespace WifiSpeaker;
 
+/// <summary>Erro que nao adianta tentar de novo (formato nao suportado, microfone ausente).</summary>
+sealed class FatalException : Exception
+{
+    public FatalException(string message) : base(message) { }
+}
+
+/// <summary>Falha de conexao: mostra a mensagem e tenta de novo.</summary>
+sealed class RetryException : Exception
+{
+    public RetryException(string message) : base(message) { }
+}
+
 /// <summary>
-/// Captura o som que esta tocando no PC (WASAPI loopback) e envia ao receptor do celular.
+/// Captura o som que esta tocando no PC (WASAPI loopback) ou o microfone e envia ao receptor.
+/// Se a conexao cair, reconecta sozinho. Pode achar o receptor automaticamente na rede.
 /// </summary>
 sealed class AudioSender
 {
     private readonly Action<string> status;
+    private readonly Action<string>? onReceiverFound;
+    private string? lastName;
 
-    public AudioSender(Action<string> status) => this.status = status;
-
-    public async Task RunAsync(string host, CancellationToken ct)
+    public AudioSender(Action<string> status, string? lastReceiver, Action<string>? onReceiverFound)
     {
-        using var client = new TcpClient { NoDelay = true };
+        this.status = status;
+        this.lastName = lastReceiver;
+        this.onReceiverFound = onReceiverFound;
+    }
 
-        status($"Conectando a {host}...");
+    /// <param name="auto">Descobrir o receptor na rede (ignora host).</param>
+    /// <param name="mic">true = microfone; false = som do computador.</param>
+    public async Task RunAsync(bool auto, string host, bool mic, string? micId, CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                await StreamOnceAsync(auto, host, mic, micId, ct);
+                if (!ct.IsCancellationRequested)
+                    status("Captura encerrada, reiniciando...");
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (FatalException)
+            {
+                throw;
+            }
+            catch (RetryException ex) when (!ct.IsCancellationRequested)
+            {
+                status(ex.Message);
+            }
+            catch (Exception) when (!ct.IsCancellationRequested)
+            {
+                status("Conexao perdida, reconectando...");
+            }
+            catch (Exception)
+            {
+                break; // erro causado pelo proprio cancelamento
+            }
+
+            if (ct.IsCancellationRequested) break;
+            try
+            {
+                await Task.Delay(1000, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+        }
+    }
+
+    private async Task StreamOnceAsync(bool auto, string host, bool mic, string? micId, CancellationToken ct)
+    {
+        string target;
+        int port = Proto.Port;
+
+        if (auto)
+        {
+            status("Procurando receptor na rede...");
+            var found = await Discovery.FindAsync(lastName, 1500, ct);
+            if (ct.IsCancellationRequested) return;
+            if (found == null)
+                throw new RetryException("Nenhum receptor encontrado, procurando de novo...");
+
+            target = found.Host;
+            port = found.Port;
+            lastName = found.Name;
+            onReceiverFound?.Invoke(found.Name);
+        }
+        else
+        {
+            target = host.Trim();
+        }
+
+        using var client = new TcpClient { NoDelay = true };
+        status($"Conectando a {target}...");
         try
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            timeout.CancelAfter(TimeSpan.FromSeconds(5));
-            await client.ConnectAsync(host, Proto.Port, timeout.Token);
+            timeout.CancelAfter(4000);
+            await client.ConnectAsync(target, port, timeout.Token);
         }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            throw new IOException("tempo esgotado ao conectar (confira o IP e se o receptor esta iniciado)");
+            throw;
+        }
+        catch (Exception)
+        {
+            throw new RetryException($"Sem conexao com {target}, tentando de novo...");
         }
 
         var stream = client.GetStream();
 
-        using var capture = new WasapiLoopbackCapture();
+        using var capture = CreateCapture(mic, micId);
         WaveFormat src = capture.WaveFormat;
         WaveFormat std = src is WaveFormatExtensible ext ? ext.ToStandardWaveFormat() : src;
 
         bool isFloat = std.Encoding == WaveFormatEncoding.IeeeFloat && std.BitsPerSample == 32;
         bool isPcm16 = std.Encoding == WaveFormatEncoding.Pcm && std.BitsPerSample == 16;
         if (!isFloat && !isPcm16)
-            throw new NotSupportedException("formato de audio do Windows nao suportado: " + std);
+            throw new FatalException("formato de audio do Windows nao suportado: " + std);
 
         int align = src.BlockAlign;
         int channels = src.Channels;
@@ -108,10 +197,28 @@ sealed class AudioSender
         });
 
         capture.StartRecording();
-        status($"Transmitindo para {host}");
+        status($"Transmitindo para {target} ({(mic ? "microfone" : "som do computador")})");
 
         Exception? error = await done.Task;
         if (error != null && !ct.IsCancellationRequested)
             throw new IOException(error.Message);
+    }
+
+    private static WasapiCapture CreateCapture(bool mic, string? micId)
+    {
+        if (!mic) return new WasapiLoopbackCapture();
+
+        try
+        {
+            using var enumerator = new MMDeviceEnumerator();
+            MMDevice device = micId == null
+                ? enumerator.GetDefaultAudioEndpoint(DataFlow.Capture, Role.Console)
+                : enumerator.GetDevice(micId);
+            return new WasapiCapture(device, false, 50);
+        }
+        catch (Exception ex)
+        {
+            throw new FatalException("nao foi possivel abrir o microfone: " + ex.Message);
+        }
     }
 }

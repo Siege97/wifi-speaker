@@ -22,6 +22,7 @@ import java.net.Socket;
 /**
  * Receptor: fica escutando na porta TCP, recebe PCM do transmissor e toca
  * pela saída de áudio do aparelho (alto-falante, fone ou cabo P2).
+ * Também responde à descoberta automática dos transmissores.
  * Funciona a partir do Android 5.0.
  */
 public class ReceiverService extends Service {
@@ -32,8 +33,10 @@ public class ReceiverService extends Service {
     private volatile ServerSocket server;
     private volatile Socket current;
     private Thread thread;
+    private Discovery.Responder responder;
     private PowerManager.WakeLock wakeLock;
     private WifiManager.WifiLock wifiLock;
+    private WifiManager.MulticastLock multicastLock;
 
     @Override
     public IBinder onBind(Intent intent) {
@@ -50,6 +53,10 @@ public class ReceiverService extends Service {
             running = true;
             Status.receiverRunning = true;
             acquireLocks();
+
+            responder = new Discovery.Responder(Build.MANUFACTURER + " " + Build.MODEL);
+            responder.start();
+
             thread = new Thread(this::loop, "wifispeaker-receiver");
             thread.start();
         }
@@ -59,6 +66,9 @@ public class ReceiverService extends Service {
     @Override
     public void onDestroy() {
         running = false;
+        if (responder != null) {
+            responder.shutdown();
+        }
         closeQuietly(server);
         closeQuietly(current);
         releaseLocks();
@@ -84,21 +94,45 @@ public class ReceiverService extends Service {
 
         Status.receiver = "Aguardando o transmissor...";
         while (running) {
-            Socket s = null;
+            final Socket s;
             try {
                 s = server.accept();
-                current = s;
-                s.setTcpNoDelay(true);
-                Status.receiver = "Conectado a " + s.getInetAddress().getHostAddress();
-                play(s);
             } catch (IOException e) {
-                // conexão encerrada ou erro de rede: volta a esperar
-            } finally {
-                closeQuietly(s);
-                current = null;
+                if (!running || server.isClosed()) {
+                    break;
+                }
+                try {
+                    Thread.sleep(200);
+                } catch (InterruptedException ie) {
+                    break;
+                }
+                continue;
             }
-            if (running) {
-                Status.receiver = "Aguardando o transmissor...";
+
+            // Um transmissor novo sempre assume. Isso é o que permite reconectar depois de uma
+            // queda do Wi-Fi: a conexão antiga pode ficar "meio aberta" no receptor, sem nunca
+            // dar erro, e ela travaria a fila se só aceitássemos uma conexão por vez.
+            Socket old = current;
+            current = s;
+            closeQuietly(old);
+            new Thread(() -> handle(s), "wifispeaker-play").start();
+        }
+    }
+
+    private void handle(Socket s) {
+        try {
+            s.setTcpNoDelay(true);
+            Status.receiver = "Conectado a " + s.getInetAddress().getHostAddress();
+            play(s);
+        } catch (IOException e) {
+            // conexão encerrada ou erro de rede
+        } finally {
+            closeQuietly(s);
+            if (current == s) {
+                current = null;
+                if (running) {
+                    Status.receiver = "Aguardando o transmissor...";
+                }
             }
         }
     }
@@ -117,17 +151,41 @@ public class ReceiverService extends Service {
 
         int mask = channels == 2 ? AudioFormat.CHANNEL_OUT_STEREO : AudioFormat.CHANNEL_OUT_MONO;
         int min = AudioTrack.getMinBufferSize(rate, mask, AudioFormat.ENCODING_PCM_16BIT);
-        // Buffer um pouco maior que o mínimo: troca um pouco de atraso por menos falhas no som.
-        int bufSize = Math.max(min * 2, Proto.CHUNK * 4);
+        int frameBytes = channels * 2;
+
+        // bufferMs == 0: padrão (toca na hora). Caso contrário, acumula esse tanto de áudio
+        // antes de começar a tocar: mais estável contra falhas do Wi-Fi, porém com mais atraso.
+        int bufferMs = Prefs.bufferMs(this);
+        int target = 0;
+        int bufSize;
+        if (bufferMs <= 0) {
+            bufSize = Math.max(min * 2, Proto.CHUNK * 4);
+        } else {
+            target = (int) ((long) rate * frameBytes * bufferMs / 1000);
+            target -= target % frameBytes;
+            bufSize = Math.max(min, target * 2 + Proto.CHUNK * 2);
+        }
 
         AudioTrack track = new AudioTrack(AudioManager.STREAM_MUSIC, rate, mask,
                 AudioFormat.ENCODING_PCM_16BIT, bufSize, AudioTrack.MODE_STREAM);
         try {
-            track.play();
+            boolean playing = false;
+            if (bufferMs <= 0) {
+                track.play();
+                playing = true;
+            }
+            int queued = 0;
             byte[] buf = new byte[Proto.CHUNK];
             while (running) {
                 in.readFully(buf);
                 track.write(buf, 0, buf.length);
+                if (!playing) {
+                    queued += buf.length;
+                    if (queued >= target) {
+                        track.play();
+                        playing = true;
+                    }
+                }
             }
         } finally {
             try {
@@ -151,6 +209,11 @@ public class ReceiverService extends Service {
             wifiLock = wm.createWifiLock(mode, "wifispeaker:receiver");
             wifiLock.setReferenceCounted(false);
             wifiLock.acquire();
+
+            // Sem isso, alguns aparelhos descartam os pacotes de broadcast da descoberta.
+            multicastLock = wm.createMulticastLock("wifispeaker:discovery");
+            multicastLock.setReferenceCounted(false);
+            multicastLock.acquire();
         }
     }
 
@@ -160,6 +223,9 @@ public class ReceiverService extends Service {
         }
         if (wifiLock != null && wifiLock.isHeld()) {
             wifiLock.release();
+        }
+        if (multicastLock != null && multicastLock.isHeld()) {
+            multicastLock.release();
         }
     }
 

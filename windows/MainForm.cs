@@ -1,27 +1,60 @@
+using NAudio.CoreAudioApi;
+
 namespace WifiSpeaker;
 
 sealed class MainForm : Form
 {
-    private static readonly string HostFile = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "WifiSpeaker", "host.txt");
+    private const int BufMin = 50;
+    private const int BufMax = 1000;
 
+    private readonly Settings settings = Settings.Load();
+
+    /// <summary>Buffer de reproducao em ms lido pelo receptor; 0 = padrao.</summary>
+    private volatile int currentBufferMs;
+
+    // --- Receptor
     private readonly Button recvButton = new() { Text = "Iniciar receptor", AutoSize = true };
     private readonly Label recvStatus = new() { Text = "Estado: Parado", AutoSize = true, MaximumSize = new Size(440, 0) };
     private readonly Label recvIps = new() { AutoSize = true, MaximumSize = new Size(440, 0) };
+    private readonly CheckBox bufferDefault = new() { Text = "Usar buffer padrao", AutoSize = true };
+    private readonly Label bufferLabel = new() { AutoSize = true };
+    private readonly TrackBar bufferTrack = new()
+    {
+        Minimum = BufMin, Maximum = BufMax, TickFrequency = 50, SmallChange = 10, LargeChange = 50, Width = 400,
+    };
 
+    // --- Transmissor
+    private readonly CheckBox autoBox = new() { Text = "Descobrir o receptor automaticamente", AutoSize = true };
     private readonly TextBox hostBox = new() { Width = 320, PlaceholderText = "IP do celular, ex.: 192.168.0.25" };
+    private readonly RadioButton rbSystem = new() { Text = "Som do computador (o que esta tocando)", AutoSize = true };
+    private readonly RadioButton rbMic = new() { Text = "Microfone", AutoSize = true };
+    private readonly ComboBox micBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 360 };
     private readonly Button sendButton = new() { Text = "Iniciar transmissor", AutoSize = true };
     private readonly Label sendStatus = new() { Text = "Estado: Parado", AutoSize = true, MaximumSize = new Size(440, 0) };
 
     private CancellationTokenSource? recvCts;
     private CancellationTokenSource? sendCts;
 
+    private sealed class MicItem
+    {
+        public string? Id { get; }
+        public string Name { get; }
+
+        public MicItem(string? id, string name)
+        {
+            Id = id;
+            Name = name;
+        }
+
+        public override string ToString() => Name;
+    }
+
     public MainForm()
     {
         Text = "Wi-Fi Speaker";
         Font = new Font("Segoe UI", 10f);
         StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(500, 520);
+        ClientSize = new Size(500, 760);
 
         var panel = new FlowLayoutPanel
         {
@@ -32,33 +65,60 @@ sealed class MainForm : Form
             Padding = new Padding(16),
         };
 
-        panel.Controls.Add(Text_("Wi-Fi Speaker", 18f, bold: true));
-        panel.Controls.Add(Text_("Os dois aparelhos precisam estar na mesma rede Wi-Fi."));
+        panel.Controls.Add(Lbl("Wi-Fi Speaker", 18f, bold: true));
+        panel.Controls.Add(Lbl("Os dois aparelhos precisam estar na mesma rede Wi-Fi."));
 
-        panel.Controls.Add(Text_("Receptor", 13f, bold: true, top: 16));
-        panel.Controls.Add(Text_("Toca neste PC o som enviado pelo transmissor do celular. "
-            + "Na primeira vez, o Windows pode pedir permissao no firewall: permita em redes privadas."));
+        // ---------------------------------------------------------------- Receptor
+        panel.Controls.Add(Lbl("Receptor", 13f, bold: true, top: 16));
+        panel.Controls.Add(Lbl("Toca neste PC o som enviado pelo transmissor do celular. "
+            + "Na primeira vez, o Windows pode pedir permissao no firewall: permita em redes privadas. "
+            + "Os transmissores da rede encontram este PC sozinhos."));
         panel.Controls.Add(recvButton);
         panel.Controls.Add(recvStatus);
         panel.Controls.Add(recvIps);
+        panel.Controls.Add(bufferDefault);
+        panel.Controls.Add(bufferLabel);
+        panel.Controls.Add(bufferTrack);
+        panel.Controls.Add(Lbl("Buffer maior = som mais estavel, porem com mais atraso. "
+            + "Vale a partir da proxima conexao."));
 
-        panel.Controls.Add(Text_("Transmissor", 13f, bold: true, top: 16));
-        panel.Controls.Add(Text_("Envia o som que esta tocando neste PC para o celular "
-            + "que esta com o receptor iniciado. Digite o IP mostrado no celular."));
+        // ---------------------------------------------------------------- Transmissor
+        panel.Controls.Add(Lbl("Transmissor", 13f, bold: true, top: 16));
+        panel.Controls.Add(Lbl("Envia o som deste PC para o celular que esta com o receptor iniciado."));
+        panel.Controls.Add(autoBox);
         panel.Controls.Add(hostBox);
+        panel.Controls.Add(Lbl("O que transmitir:"));
+        panel.Controls.Add(rbSystem);
+        panel.Controls.Add(rbMic);
+        panel.Controls.Add(micBox);
         panel.Controls.Add(sendButton);
         panel.Controls.Add(sendStatus);
 
         Controls.Add(panel);
 
-        try
+        // ---------------------------------------------------------------- estado salvo
+        LoadMics();
+
+        bufferTrack.Value = Math.Clamp(settings.BufferMs, BufMin, BufMax);
+        bufferDefault.Checked = settings.BufferDefault;
+        UpdateBufferUi();
+
+        autoBox.Checked = settings.Auto;
+        hostBox.Text = settings.Host;
+        hostBox.Enabled = !autoBox.Checked;
+        rbMic.Checked = settings.Mic;
+        rbSystem.Checked = !settings.Mic;
+        micBox.Enabled = rbMic.Checked;
+
+        // ---------------------------------------------------------------- eventos
+        bufferDefault.CheckedChanged += (_, _) => UpdateBufferUi();
+        bufferTrack.ValueChanged += (_, _) =>
         {
-            if (File.Exists(HostFile)) hostBox.Text = File.ReadAllText(HostFile).Trim();
-        }
-        catch
-        {
-            // sem IP salvo
-        }
+            if (!bufferDefault.Checked) settings.BufferMs = bufferTrack.Value;
+            UpdateBufferUi();
+        };
+        autoBox.CheckedChanged += (_, _) => hostBox.Enabled = !autoBox.Checked;
+        rbMic.CheckedChanged += (_, _) => micBox.Enabled = rbMic.Checked;
 
         recvButton.Click += (_, _) => ToggleReceiver();
         sendButton.Click += (_, _) => ToggleSender();
@@ -66,10 +126,12 @@ sealed class MainForm : Form
         {
             recvCts?.Cancel();
             sendCts?.Cancel();
+            CollectSettings();
+            settings.Save();
         };
     }
 
-    private static Label Text_(string text, float size = 10f, bool bold = false, int top = 4)
+    private static Label Lbl(string text, float size = 10f, bool bold = false, int top = 4)
     {
         return new Label
         {
@@ -88,6 +150,51 @@ sealed class MainForm : Form
         else action();
     }
 
+    private void LoadMics()
+    {
+        micBox.Items.Add(new MicItem(null, "Microfone padrao"));
+        try
+        {
+            using var enumerator = new MMDeviceEnumerator();
+            foreach (var d in enumerator.EnumerateAudioEndPoints(DataFlow.Capture, DeviceState.Active))
+                micBox.Items.Add(new MicItem(d.ID, d.FriendlyName));
+        }
+        catch
+        {
+            // sem lista: fica so o microfone padrao
+        }
+
+        int index = 0;
+        for (int i = 0; i < micBox.Items.Count; i++)
+        {
+            if (micBox.Items[i] is MicItem m && m.Id == settings.MicId)
+            {
+                index = i;
+                break;
+            }
+        }
+        micBox.SelectedIndex = index;
+    }
+
+    private void UpdateBufferUi()
+    {
+        bool def = bufferDefault.Checked;
+        bufferTrack.Enabled = !def;
+        currentBufferMs = def ? 0 : bufferTrack.Value;
+        bufferLabel.Text = def ? "Buffer: padrao" : $"Buffer: {bufferTrack.Value} ms";
+        settings.BufferDefault = def;
+    }
+
+    private void CollectSettings()
+    {
+        settings.Auto = autoBox.Checked;
+        settings.Host = hostBox.Text.Trim();
+        settings.Mic = rbMic.Checked;
+        settings.MicId = (micBox.SelectedItem as MicItem)?.Id;
+    }
+
+    // ---------------------------------------------------------------- Receptor
+
     private async void ToggleReceiver()
     {
         if (recvCts != null)
@@ -98,12 +205,12 @@ sealed class MainForm : Form
 
         var cts = recvCts = new CancellationTokenSource();
         recvButton.Text = "Parar receptor";
-        recvIps.Text = "Enderecos deste PC (use um deles no transmissor do celular):\r\n" + Net.LocalIps();
+        recvIps.Text = "Enderecos deste PC:\r\n" + Net.LocalIps();
 
         string final = "Parado";
         try
         {
-            var receiver = new AudioReceiver(m => Ui(() => recvStatus.Text = "Estado: " + m));
+            var receiver = new AudioReceiver(m => Ui(() => recvStatus.Text = "Estado: " + m), () => currentBufferMs);
             await Task.Run(() => receiver.RunAsync(cts.Token));
         }
         catch (Exception ex)
@@ -120,6 +227,8 @@ sealed class MainForm : Form
         recvStatus.Text = "Estado: " + final;
     }
 
+    // ---------------------------------------------------------------- Transmissor
+
     private async void ToggleSender()
     {
         if (sendCts != null)
@@ -128,33 +237,36 @@ sealed class MainForm : Form
             return;
         }
 
+        bool auto = autoBox.Checked;
         string host = hostBox.Text.Trim();
-        if (host.Length == 0)
+        if (!auto && host.Length == 0)
         {
-            MessageBox.Show(this, "Digite o IP do celular (o receptor mostra o IP na tela).",
+            MessageBox.Show(this, "Digite o IP do celular ou ative a descoberta automatica.",
                 "Wi-Fi Speaker", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
 
-        try
-        {
-            Directory.CreateDirectory(Path.GetDirectoryName(HostFile)!);
-            File.WriteAllText(HostFile, host);
-        }
-        catch
-        {
-            // nao e critico
-        }
+        bool mic = rbMic.Checked;
+        string? micId = (micBox.SelectedItem as MicItem)?.Id;
+        CollectSettings();
+        settings.Save();
 
         var cts = sendCts = new CancellationTokenSource();
         sendButton.Text = "Parar transmissor";
+        autoBox.Enabled = false;
         hostBox.Enabled = false;
+        rbSystem.Enabled = false;
+        rbMic.Enabled = false;
+        micBox.Enabled = false;
 
         string final = "Parado";
         try
         {
-            var sender = new AudioSender(m => Ui(() => sendStatus.Text = "Estado: " + m));
-            await Task.Run(() => sender.RunAsync(host, cts.Token));
+            var sender = new AudioSender(
+                m => Ui(() => sendStatus.Text = "Estado: " + m),
+                settings.LastReceiver,
+                name => settings.LastReceiver = name);
+            await Task.Run(() => sender.RunAsync(auto, host, mic, micId, cts.Token));
         }
         catch (Exception ex)
         {
@@ -165,7 +277,12 @@ sealed class MainForm : Form
             cts.Dispose();
             sendCts = null;
             sendButton.Text = "Iniciar transmissor";
-            hostBox.Enabled = true;
+            autoBox.Enabled = true;
+            hostBox.Enabled = !autoBox.Checked;
+            rbSystem.Enabled = true;
+            rbMic.Enabled = true;
+            micBox.Enabled = rbMic.Checked;
+            settings.Save();
         }
         sendStatus.Text = "Estado: " + final;
     }

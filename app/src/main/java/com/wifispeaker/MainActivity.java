@@ -13,11 +13,12 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.InputType;
-import android.view.View;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -32,11 +33,22 @@ public class MainActivity extends Activity {
     private static final int REQ_AUDIO = 2;
     private static final int REQ_PROJECTION = 3;
 
+    private static final int BUF_MIN_MS = 50;
+    private static final int BUF_MAX_MS = 1000;
+
     private TextView receiverInfo;
     private TextView senderInfo;
+    private TextView bufLabel;
     private Button receiverButton;
     private Button senderButton;
     private EditText hostEdit;
+    private CheckBox bufDefault;
+    private SeekBar bufSeek;
+    private CheckBox autoBox;
+    private CheckBox appsBox;
+    private CheckBox micBox;
+
+    private SharedPreferences prefs;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable ticker = new Runnable() {
@@ -50,6 +62,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        prefs = Prefs.sp(this);
         buildUi();
 
         if (Build.VERSION.SDK_INT >= 33
@@ -104,33 +117,98 @@ public class MainActivity extends Activity {
         app.setTextSize(26);
         app.setTypeface(Typeface.DEFAULT_BOLD);
         root.addView(app);
-        root.addView(body("Os dois celulares precisam estar na mesma rede Wi-Fi "
+        root.addView(body("Os dois aparelhos precisam estar na mesma rede Wi-Fi "
                 + "(ou um deles em modo roteador/hotspot)."));
 
         // --- Receptor
         root.addView(title("Receptor (celular que toca o som)"));
-        root.addView(body("Use no celular ligado à caixa de som pelo cabo P2."));
+        root.addView(body("Use no celular ligado à caixa de som pelo cabo P2. "
+                + "Os transmissores da rede encontram este aparelho sozinhos."));
         receiverButton = new Button(this);
         receiverButton.setOnClickListener(v -> toggleReceiver());
         root.addView(receiverButton);
         receiverInfo = body("");
         root.addView(receiverInfo);
 
+        bufDefault = new CheckBox(this);
+        bufDefault.setText("Usar buffer padrão");
+        bufDefault.setChecked(prefs.getBoolean("buf_default", true));
+        root.addView(bufDefault);
+
+        bufLabel = body("");
+        root.addView(bufLabel);
+        bufSeek = new SeekBar(this);
+        bufSeek.setMax(BUF_MAX_MS - BUF_MIN_MS);
+        bufSeek.setProgress(prefs.getInt("buf_ms", 300) - BUF_MIN_MS);
+        root.addView(bufSeek);
+        root.addView(body("Buffer maior = som mais estável, porém com mais atraso. "
+                + "Vale a partir da próxima conexão."));
+
+        bufDefault.setOnCheckedChangeListener((b, checked) -> {
+            prefs.edit().putBoolean("buf_default", checked).apply();
+            updateBufferUi();
+        });
+        bufSeek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar s, int progress, boolean fromUser) {
+                if (fromUser) {
+                    prefs.edit().putInt("buf_ms", progress + BUF_MIN_MS).apply();
+                }
+                updateBufferUi();
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar s) {
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar s) {
+            }
+        });
+        updateBufferUi();
+
         // --- Transmissor
         root.addView(title("Transmissor (celular de onde sai o som)"));
-        root.addView(body(Build.VERSION.SDK_INT >= 29
-                ? "Digite o endereço IP mostrado no receptor e toque em iniciar."
-                : "Este celular tem Android " + Build.VERSION.RELEASE
-                  + ". O modo transmissor exige Android 10 ou mais recente."));
+
+        autoBox = new CheckBox(this);
+        autoBox.setText("Descobrir o receptor automaticamente");
+        autoBox.setChecked(prefs.getBoolean("auto", true));
+        root.addView(autoBox);
+
         hostEdit = new EditText(this);
         hostEdit.setHint("IP do receptor, ex.: 192.168.0.25");
         hostEdit.setInputType(InputType.TYPE_CLASS_TEXT);
         hostEdit.setSingleLine(true);
-        hostEdit.setText(getPreferences(Context.MODE_PRIVATE).getString("host", ""));
+        hostEdit.setText(prefs.getString("host", ""));
+        hostEdit.setEnabled(!autoBox.isChecked());
         root.addView(hostEdit);
+        autoBox.setOnCheckedChangeListener((b, checked) -> {
+            hostEdit.setEnabled(!checked);
+            prefs.edit().putBoolean("auto", checked).apply();
+        });
+
+        root.addView(body("O que transmitir:"));
+        appsBox = new CheckBox(this);
+        appsBox.setText("Som dos apps");
+        micBox = new CheckBox(this);
+        micBox.setText("Microfone");
+        boolean canCaptureApps = Build.VERSION.SDK_INT >= 29;
+        appsBox.setChecked(canCaptureApps && prefs.getBoolean("apps", true));
+        appsBox.setEnabled(canCaptureApps);
+        micBox.setChecked(prefs.getBoolean("mic", !canCaptureApps));
+        root.addView(appsBox);
+        root.addView(micBox);
+        if (!canCaptureApps) {
+            root.addView(body("Este celular tem Android " + Build.VERSION.RELEASE
+                    + ": o som dos apps exige Android 10 ou mais recente. O microfone funciona."));
+        } else {
+            root.addView(body("Marcando os dois, o microfone é misturado ao som dos apps."));
+        }
+        appsBox.setOnCheckedChangeListener((b, checked) -> prefs.edit().putBoolean("apps", checked).apply());
+        micBox.setOnCheckedChangeListener((b, checked) -> prefs.edit().putBoolean("mic", checked).apply());
+
         senderButton = new Button(this);
         senderButton.setOnClickListener(v -> toggleSender());
-        senderButton.setEnabled(Build.VERSION.SDK_INT >= 29);
         root.addView(senderButton);
         senderInfo = body("");
         root.addView(senderInfo);
@@ -139,6 +217,13 @@ public class MainActivity extends Activity {
         scroll.addView(root);
         setContentView(scroll);
         refresh();
+    }
+
+    private void updateBufferUi() {
+        boolean def = bufDefault.isChecked();
+        bufSeek.setEnabled(!def);
+        bufLabel.setText(def ? "Buffer: padrão"
+                : "Buffer: " + (bufSeek.getProgress() + BUF_MIN_MS) + " ms");
     }
 
     private void refresh() {
@@ -196,26 +281,58 @@ public class MainActivity extends Activity {
             refresh();
             return;
         }
-        String host = hostEdit.getText().toString().trim();
-        if (host.isEmpty()) {
-            Toast.makeText(this, "Digite o IP do receptor", Toast.LENGTH_SHORT).show();
+
+        if (!appsBox.isChecked() && !micBox.isChecked()) {
+            Toast.makeText(this, "Marque ao menos uma fonte: som dos apps ou microfone",
+                    Toast.LENGTH_LONG).show();
             return;
         }
-        getPreferences(Context.MODE_PRIVATE).edit().putString("host", host).apply();
+        String host = hostEdit.getText().toString().trim();
+        if (!autoBox.isChecked() && host.isEmpty()) {
+            Toast.makeText(this, "Digite o IP do receptor ou ative a descoberta automática",
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
+        prefs.edit().putString("host", host).apply();
 
+        // A permissão de áudio vale tanto para o microfone quanto para a captura dos apps.
         if (Build.VERSION.SDK_INT >= 23
                 && checkSelfPermission(Manifest.permission.RECORD_AUDIO)
                 != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_AUDIO);
             return;
         }
-        launchProjection();
+        beginSender();
     }
 
-    private void launchProjection() {
-        MediaProjectionManager mpm =
-                (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
-        startActivityForResult(mpm.createScreenCaptureIntent(), REQ_PROJECTION);
+    private void beginSender() {
+        if (appsBox.isChecked()) {
+            // O som dos apps exige a autorização de captura do sistema.
+            MediaProjectionManager mpm =
+                    (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
+            startActivityForResult(mpm.createScreenCaptureIntent(), REQ_PROJECTION);
+        } else {
+            startSender(0, null);
+        }
+    }
+
+    private void startSender(int resultCode, Intent data) {
+        Intent i = new Intent(this, SenderService.class);
+        i.putExtra(SenderService.EXTRA_HOST, hostEdit.getText().toString().trim());
+        i.putExtra(SenderService.EXTRA_AUTO, autoBox.isChecked());
+        i.putExtra(SenderService.EXTRA_APPS, appsBox.isChecked());
+        i.putExtra(SenderService.EXTRA_MIC, micBox.isChecked());
+        if (data != null) {
+            i.putExtra(SenderService.EXTRA_CODE, resultCode);
+            i.putExtra(SenderService.EXTRA_DATA, data);
+        }
+        Status.sender = "Iniciando...";
+        if (Build.VERSION.SDK_INT >= 26) {
+            startForegroundService(i);
+        } else {
+            startService(i);
+        }
+        refresh();
     }
 
     @Override
@@ -223,7 +340,7 @@ public class MainActivity extends Activity {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == REQ_AUDIO) {
             if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                launchProjection();
+                beginSender();
             } else {
                 Toast.makeText(this, "Sem a permissão de áudio o transmissor não funciona",
                         Toast.LENGTH_LONG).show();
@@ -241,16 +358,6 @@ public class MainActivity extends Activity {
             Toast.makeText(this, "Captura de áudio não autorizada", Toast.LENGTH_SHORT).show();
             return;
         }
-        Intent i = new Intent(this, SenderService.class);
-        i.putExtra(SenderService.EXTRA_CODE, resultCode);
-        i.putExtra(SenderService.EXTRA_DATA, data);
-        i.putExtra(SenderService.EXTRA_HOST, hostEdit.getText().toString().trim());
-        Status.sender = "Iniciando...";
-        if (Build.VERSION.SDK_INT >= 26) {
-            startForegroundService(i);
-        } else {
-            startService(i);
-        }
-        refresh();
+        startSender(resultCode, data);
     }
 }

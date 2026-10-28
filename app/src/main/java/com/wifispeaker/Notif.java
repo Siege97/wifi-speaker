@@ -42,7 +42,7 @@ final class Notif {
 
     /** startForeground com o tipo certo a partir do Android 10. */
     static void startForeground(Service s, int id, Notification n, int type) {
-        if (Build.VERSION.SDK_INT >= 29) {
+        if (Build.VERSION.SDK_INT >= 29 && type != 0) {
             s.startForeground(id, n, type);
         } else {
             s.startForeground(id, n);

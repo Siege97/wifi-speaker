@@ -7,12 +7,19 @@ namespace WifiSpeaker;
 
 /// <summary>
 /// Escuta na porta TCP e toca, nas caixas do PC, o audio enviado pelo transmissor do celular.
+/// Tambem responde a descoberta automatica dos transmissores.
 /// </summary>
 sealed class AudioReceiver
 {
     private readonly Action<string> status;
+    private readonly Func<int> bufferMs;
 
-    public AudioReceiver(Action<string> status) => this.status = status;
+    /// <param name="bufferMs">Buffer de reproducao em ms; 0 = padrao (toca na hora).</param>
+    public AudioReceiver(Action<string> status, Func<int> bufferMs)
+    {
+        this.status = status;
+        this.bufferMs = bufferMs;
+    }
 
     public async Task RunAsync(CancellationToken ct)
     {
@@ -20,12 +27,14 @@ sealed class AudioReceiver
         listener.Start();
         using var reg = ct.Register(() => listener.Stop());
 
+        _ = Discovery.RespondAsync(Environment.MachineName, ct);
+
+        CancellationTokenSource? current = null;
         try
         {
+            status("Aguardando o transmissor...");
             while (!ct.IsCancellationRequested)
             {
-                status("Aguardando o transmissor...");
-
                 TcpClient client;
                 try
                 {
@@ -40,32 +49,57 @@ sealed class AudioReceiver
                     break;
                 }
 
-                using (client)
+                // Um transmissor novo sempre assume. Isso permite reconectar depois de uma queda
+                // do Wi-Fi: a conexao antiga pode ficar "meio aberta", sem nunca dar erro.
+                var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                var old = Interlocked.Exchange(ref current, cts);
+                try
                 {
-                    try
-                    {
-                        await PlayAsync(client, ct);
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        break;
-                    }
-                    catch (Exception) when (ct.IsCancellationRequested)
-                    {
-                        break;
-                    }
-                    catch (Exception ex)
-                    {
-                        // conexao encerrada ou invalida: volta a esperar
-                        status("Conexao encerrada: " + ex.Message);
-                    }
+                    old?.Cancel();
                 }
+                catch (ObjectDisposedException)
+                {
+                }
+
+                _ = HandleAsync(client, cts, () => ReferenceEquals(Volatile.Read(ref current), cts));
             }
         }
         finally
         {
+            try
+            {
+                current?.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+            }
             listener.Stop();
         }
+    }
+
+    private async Task HandleAsync(TcpClient client, CancellationTokenSource cts, Func<bool> isCurrent)
+    {
+        using (client)
+        {
+            try
+            {
+                await PlayAsync(client, cts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                // encerrado pelo usuario ou substituido por um transmissor novo
+            }
+            catch (Exception ex) when (!cts.IsCancellationRequested)
+            {
+                status("Conexao encerrada: " + ex.Message);
+            }
+            catch (Exception)
+            {
+            }
+        }
+
+        if (isCurrent() && !cts.IsCancellationRequested)
+            status("Aguardando o transmissor...");
     }
 
     private async Task PlayAsync(TcpClient client, CancellationToken ct)
@@ -88,15 +122,25 @@ sealed class AudioReceiver
         status("Conectado a " + remote);
 
         var format = new WaveFormat(rate, 16, channels);
+
+        // ms == 0: padrao (toca na hora). Caso contrario, acumula esse tanto de audio antes de
+        // comecar a tocar: mais estavel contra falhas do Wi-Fi, porem com mais atraso.
+        int ms = Math.Max(0, bufferMs());
         var buffer = new BufferedWaveProvider(format)
         {
-            BufferDuration = TimeSpan.FromSeconds(2),
+            BufferDuration = TimeSpan.FromMilliseconds(Math.Max(2000, ms * 3)),
             DiscardOnBufferOverflow = true,
         };
 
         using var output = new WaveOutEvent { DesiredLatency = 150 };
         output.Init(buffer);
-        output.Play();
+
+        bool started = false;
+        if (ms <= 0)
+        {
+            output.Play();
+            started = true;
+        }
 
         int align = format.BlockAlign;
         var buf = new byte[16384];
@@ -114,6 +158,12 @@ sealed class AudioReceiver
                 buffer.AddSamples(buf, 0, usable);
                 have -= usable;
                 if (have > 0) Buffer.BlockCopy(buf, usable, buf, 0, have);
+            }
+
+            if (!started && buffer.BufferedDuration.TotalMilliseconds >= ms)
+            {
+                output.Play();
+                started = true;
             }
         }
     }

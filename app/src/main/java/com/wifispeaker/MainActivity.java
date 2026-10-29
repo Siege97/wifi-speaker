@@ -47,6 +47,12 @@ public class MainActivity extends Activity {
     private CheckBox autoBox;
     private CheckBox appsBox;
     private CheckBox micBox;
+    private TextView volLabel;
+    private TextView remoteLabel;
+    private SeekBar volSeek;
+    private SeekBar remoteSeek;
+    private boolean volTouch = false;
+    private boolean remoteTouch = false;
 
     private SharedPreferences prefs;
 
@@ -129,6 +135,37 @@ public class MainActivity extends Activity {
         root.addView(receiverButton);
         receiverInfo = body("");
         root.addView(receiverInfo);
+
+        // Volume de reprodução deste aparelho. Se um transmissor estiver conectado, o slider dele
+        // acompanha este (e vice-versa).
+        Volume.receiver = prefs.getInt("volume", 100);
+        volLabel = body("");
+        root.addView(volLabel);
+        volSeek = new SeekBar(this);
+        volSeek.setMax(100);
+        volSeek.setProgress(Volume.receiver);
+        root.addView(volSeek);
+        volSeek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar s, int progress, boolean fromUser) {
+                volLabel.setText("Volume do receptor: " + progress + "%");
+                if (fromUser) {
+                    prefs.edit().putInt("volume", progress).apply();
+                    Volume.setReceiverFromUser(progress);
+                }
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar s) {
+                volTouch = true;
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar s) {
+                volTouch = false;
+            }
+        });
+        volLabel.setText("Volume do receptor: " + Volume.receiver + "%");
 
         bufDefault = new CheckBox(this);
         bufDefault.setText("Usar buffer padrão");
@@ -213,6 +250,35 @@ public class MainActivity extends Activity {
         senderInfo = body("");
         root.addView(senderInfo);
 
+        // Controle remoto do volume do receptor conectado. Ao conectar, ele mostra o valor do receptor.
+        remoteLabel = body("");
+        root.addView(remoteLabel);
+        remoteSeek = new SeekBar(this);
+        remoteSeek.setMax(100);
+        remoteSeek.setProgress(Volume.remote);
+        root.addView(remoteSeek);
+        root.addView(body("Só tem efeito com o transmissor conectado. O volume vale no receptor."));
+        remoteSeek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar s, int progress, boolean fromUser) {
+                remoteLabel.setText("Volume no receptor: " + progress + "%");
+                if (fromUser) {
+                    Volume.setRemoteFromUser(progress);
+                }
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar s) {
+                remoteTouch = true;
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar s) {
+                remoteTouch = false;
+            }
+        });
+        remoteLabel.setText("Volume no receptor: " + Volume.remote + "%");
+
         ScrollView scroll = new ScrollView(this);
         scroll.addView(root);
         setContentView(scroll);
@@ -236,6 +302,14 @@ public class MainActivity extends Activity {
 
         senderButton.setText(Status.senderRunning ? "Parar transmissor" : "Iniciar transmissor");
         senderInfo.setText("Estado: " + Status.sender);
+
+        // Espelha mudanças vindas do outro aparelho (sem mexer enquanto o dedo está no slider).
+        if (volSeek != null && !volTouch && volSeek.getProgress() != Volume.receiver) {
+            volSeek.setProgress(Volume.receiver);
+        }
+        if (remoteSeek != null && !remoteTouch && remoteSeek.getProgress() != Volume.remote) {
+            remoteSeek.setProgress(Volume.remote);
+        }
     }
 
     private static String localIps() {

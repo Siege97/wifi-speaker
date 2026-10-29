@@ -14,14 +14,73 @@ sealed class AudioReceiver
     private readonly Action<string> status;
     private readonly Func<int> bufferMs;
     private readonly Func<string?> outputDevice;
+    private readonly Func<int> volume;
+    private readonly Action<int> onPeerVolume;
+    private VolumeLink? link;
 
     /// <param name="bufferMs">Buffer de reproducao em ms; 0 = padrao (toca na hora).</param>
     /// <param name="outputDevice">Nome do dispositivo de saida; null = padrao do Windows.</param>
-    public AudioReceiver(Action<string> status, Func<int> bufferMs, Func<string?> outputDevice)
+    /// <param name="volume">Volume de reproducao (0 a 100).</param>
+    /// <param name="onPeerVolume">Chamado quando o transmissor muda o volume pelo slider dele.</param>
+    public AudioReceiver(Action<string> status, Func<int> bufferMs, Func<string?> outputDevice,
+        Func<int> volume, Action<int> onPeerVolume)
     {
         this.status = status;
         this.bufferMs = bufferMs;
         this.outputDevice = outputDevice;
+        this.volume = volume;
+        this.onPeerVolume = onPeerVolume;
+    }
+
+    /// <summary>Avisa o transmissor conectado de que o volume mudou neste PC.</summary>
+    public void PushVolume(int v) => Volatile.Read(ref link)?.Send(v);
+
+    /// <summary>
+    /// Controle de volume: o transmissor conecta aqui, recebe o volume atual e passa a mandar e
+    /// receber mudancas. Falhar aqui nao afeta o audio.
+    /// </summary>
+    private async Task ControlLoopAsync(CancellationToken ct)
+    {
+        TcpListener? listener = null;
+        try
+        {
+            listener = new TcpListener(IPAddress.Any, Proto.ControlPort);
+            listener.Start();
+            using var reg = ct.Register(() => listener.Stop());
+
+            while (!ct.IsCancellationRequested)
+            {
+                var tcp = await listener.AcceptTcpClientAsync(ct);
+                var next = new VolumeLink(tcp);
+                next.Received += v => onPeerVolume(v);
+
+                // um transmissor novo assume
+                Interlocked.Exchange(ref link, next)?.Close();
+
+                _ = Task.Run(async () =>
+                {
+                    next.Send(volume());
+                    await next.ReadLoopAsync(ct);
+                    next.Close();
+                    Interlocked.CompareExchange(ref link, null, next);
+                });
+            }
+        }
+        catch
+        {
+            // porta em uso ou receptor parando: so o volume deixa de sincronizar
+        }
+        finally
+        {
+            try
+            {
+                listener?.Stop();
+            }
+            catch
+            {
+            }
+            Interlocked.Exchange(ref link, null)?.Close();
+        }
     }
 
     /// <summary>Nomes dos dispositivos de saida de audio (o Windows corta em 31 caracteres).</summary>
@@ -63,6 +122,7 @@ sealed class AudioReceiver
         using var reg = ct.Register(() => listener.Stop());
 
         _ = Discovery.RespondAsync(Environment.MachineName, ct);
+        _ = ControlLoopAsync(ct);
 
         CancellationTokenSource? current = null;
         try
@@ -180,7 +240,7 @@ sealed class AudioReceiver
         };
 
         using var output = new WaveOutEvent { DesiredLatency = 150, DeviceNumber = deviceNumber };
-        output.Init(buffer);
+        output.Init(new GainProvider(buffer, () => volume() / 100f));
 
         bool started = false;
         if (ms <= 0)

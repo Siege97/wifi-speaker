@@ -25,14 +25,22 @@ sealed class AudioSender
 {
     private readonly Action<string> status;
     private readonly Action<string>? onReceiverFound;
+    private readonly Action<int> onRemoteVolume;
     private string? lastName;
+    private VolumeLink? link;
 
-    public AudioSender(Action<string> status, string? lastReceiver, Action<string>? onReceiverFound)
+    /// <param name="onRemoteVolume">Chamado quando o volume do receptor muda (ao conectar ou pelo slider dele).</param>
+    public AudioSender(Action<string> status, string? lastReceiver, Action<string>? onReceiverFound,
+        Action<int> onRemoteVolume)
     {
         this.status = status;
         this.lastName = lastReceiver;
         this.onReceiverFound = onReceiverFound;
+        this.onRemoteVolume = onRemoteVolume;
     }
+
+    /// <summary>Muda o volume do receptor conectado (so tem efeito com o controle conectado).</summary>
+    public void PushVolume(int v) => Volatile.Read(ref link)?.Send(v);
 
     /// <param name="auto">Descobrir o receptor na rede (ignora host).</param>
     /// <param name="mic">true = microfone; false = som do computador.</param>
@@ -121,6 +129,11 @@ sealed class AudioSender
 
         var stream = client.GetStream();
 
+        // Controle de volume com o receptor (melhor esforco: nao interfere no audio se falhar).
+        var controlCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        using var stopControl = new CancelOnDispose(controlCts);
+        _ = RunControlAsync(target, controlCts.Token);
+
         using var capture = CreateCapture(mic, micId);
         WaveFormat src = capture.WaveFormat;
         WaveFormat std = src is WaveFormatExtensible ext ? ext.ToStandardWaveFormat() : src;
@@ -202,6 +215,59 @@ sealed class AudioSender
         Exception? error = await done.Task;
         if (error != null && !ct.IsCancellationRequested)
             throw new IOException(error.Message);
+    }
+
+    /// <summary>Cancela e libera o token ao sair do bloco (using).</summary>
+    private sealed class CancelOnDispose : IDisposable
+    {
+        private readonly CancellationTokenSource cts;
+
+        public CancelOnDispose(CancellationTokenSource cts) => this.cts = cts;
+
+        public void Dispose()
+        {
+            try
+            {
+                cts.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+            cts.Dispose();
+        }
+    }
+
+    /// <summary>Conecta ao controle do receptor e fica lendo o volume dele ate a conexao acabar.</summary>
+    private async Task RunControlAsync(string host, CancellationToken ct)
+    {
+        TcpClient? tcp = null;
+        VolumeLink? mine = null;
+        try
+        {
+            tcp = new TcpClient();
+            using (var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct))
+            {
+                timeout.CancelAfter(2000);
+                await tcp.ConnectAsync(host, Proto.ControlPort, timeout.Token);
+            }
+
+            mine = new VolumeLink(tcp);
+            mine.Received += v => onRemoteVolume(v);
+            Volatile.Write(ref link, mine);
+
+            using var reg = ct.Register(() => mine?.Close());
+            await mine.ReadLoopAsync(ct); // o receptor manda o volume atual ao conectar
+        }
+        catch
+        {
+            // receptor sem controle de volume (versao antiga) ou porta fechada: o audio segue normal
+        }
+        finally
+        {
+            if (mine != null) Interlocked.CompareExchange(ref link, null, mine);
+            mine?.Close();
+            tcp?.Dispose();
+        }
     }
 
     private static WasapiCapture CreateCapture(bool mic, string? micId)

@@ -17,6 +17,26 @@ sealed class MainForm : Form
 
     private const string DefaultOutputLabel = "Padrao do Windows";
 
+    /// <summary>Volume de reproducao deste PC (0 a 100), lido pelo receptor.</summary>
+    private volatile int currentVolume = 100;
+
+    /// <summary>true enquanto um slider e movido por causa do outro aparelho (evita devolver o valor).</summary>
+    private bool syncing;
+
+    private AudioReceiver? activeReceiver;
+    private AudioSender? activeSender;
+
+    private readonly Label volLabel = new() { AutoSize = true };
+    private readonly TrackBar volTrack = new()
+    {
+        Minimum = 0, Maximum = 100, TickFrequency = 10, SmallChange = 1, LargeChange = 10, Width = 400, Value = 100,
+    };
+    private readonly Label remoteLabel = new() { AutoSize = true };
+    private readonly TrackBar remoteTrack = new()
+    {
+        Minimum = 0, Maximum = 100, TickFrequency = 10, SmallChange = 1, LargeChange = 10, Width = 400, Value = 100,
+    };
+
     // --- Receptor
     private readonly Button recvButton = new() { Text = "Iniciar receptor", AutoSize = true };
     private readonly Label recvStatus = new() { Text = "Estado: Parado", AutoSize = true, MaximumSize = new Size(440, 0) };
@@ -82,6 +102,9 @@ sealed class MainForm : Form
         panel.Controls.Add(recvButton);
         panel.Controls.Add(recvStatus);
         panel.Controls.Add(recvIps);
+        panel.Controls.Add(volLabel);
+        panel.Controls.Add(volTrack);
+        panel.Controls.Add(Lbl("Se um transmissor estiver conectado, o slider dele acompanha este."));
         panel.Controls.Add(Lbl("Saida de audio (onde o som e tocado). Para usar como microfone em outros "
             + "programas, escolha o \"CABLE Input\" de um cabo de audio virtual (ex.: VB-Cable). "
             + "Vale a partir da proxima conexao."));
@@ -101,6 +124,10 @@ sealed class MainForm : Form
         panel.Controls.Add(rbSystem);
         panel.Controls.Add(rbMic);
         panel.Controls.Add(micBox);
+        panel.Controls.Add(remoteLabel);
+        panel.Controls.Add(remoteTrack);
+        panel.Controls.Add(Lbl("Controla o volume do receptor conectado; so tem efeito com o transmissor "
+            + "ligado. O volume vale no receptor."));
         panel.Controls.Add(sendButton);
         panel.Controls.Add(sendStatus);
 
@@ -111,6 +138,11 @@ sealed class MainForm : Form
 
         currentOutput = settings.OutputDevice;
         RefreshOutputs();
+
+        volTrack.Value = Math.Clamp(settings.Volume, 0, 100);
+        currentVolume = volTrack.Value;
+        volLabel.Text = $"Volume do receptor: {volTrack.Value}%";
+        remoteLabel.Text = $"Volume no receptor: {remoteTrack.Value}%";
 
         bufferTrack.Value = Math.Clamp(settings.BufferMs, BufMin, BufMax);
         bufferDefault.Checked = settings.BufferDefault;
@@ -124,6 +156,18 @@ sealed class MainForm : Form
         micBox.Enabled = rbMic.Checked;
 
         // ---------------------------------------------------------------- eventos
+        volTrack.ValueChanged += (_, _) =>
+        {
+            currentVolume = volTrack.Value;
+            settings.Volume = volTrack.Value;
+            volLabel.Text = $"Volume do receptor: {volTrack.Value}%";
+            if (!syncing) activeReceiver?.PushVolume(volTrack.Value);
+        };
+        remoteTrack.ValueChanged += (_, _) =>
+        {
+            remoteLabel.Text = $"Volume no receptor: {remoteTrack.Value}%";
+            if (!syncing) activeSender?.PushVolume(remoteTrack.Value);
+        };
         outBox.DropDown += (_, _) => RefreshOutputs(); // pega dispositivos instalados depois
         outBox.SelectionChangeCommitted += (_, _) =>
         {
@@ -160,6 +204,23 @@ sealed class MainForm : Form
             Font = new Font("Segoe UI", size, bold ? FontStyle.Bold : FontStyle.Regular),
             Margin = new Padding(0, top, 0, 4),
         };
+    }
+
+    /// <summary>Move um slider por causa de uma mudanca feita no outro aparelho.</summary>
+    private void SetFromPeer(TrackBar track, int value)
+    {
+        Ui(() =>
+        {
+            syncing = true;
+            try
+            {
+                track.Value = Math.Clamp(value, 0, 100);
+            }
+            finally
+            {
+                syncing = false;
+            }
+        });
     }
 
     private void Ui(Action action)
@@ -250,7 +311,10 @@ sealed class MainForm : Form
             var receiver = new AudioReceiver(
                 m => Ui(() => recvStatus.Text = "Estado: " + m),
                 () => currentBufferMs,
-                () => currentOutput);
+                () => currentOutput,
+                () => currentVolume,
+                v => SetFromPeer(volTrack, v));
+            activeReceiver = receiver;
             await Task.Run(() => receiver.RunAsync(cts.Token));
         }
         catch (Exception ex)
@@ -261,6 +325,7 @@ sealed class MainForm : Form
         {
             cts.Dispose();
             recvCts = null;
+            activeReceiver = null;
             recvButton.Text = "Iniciar receptor";
             recvIps.Text = "";
         }
@@ -305,7 +370,9 @@ sealed class MainForm : Form
             var sender = new AudioSender(
                 m => Ui(() => sendStatus.Text = "Estado: " + m),
                 settings.LastReceiver,
-                name => settings.LastReceiver = name);
+                name => settings.LastReceiver = name,
+                v => SetFromPeer(remoteTrack, v));
+            activeSender = sender;
             await Task.Run(() => sender.RunAsync(auto, host, mic, micId, cts.Token));
         }
         catch (Exception ex)
@@ -316,6 +383,7 @@ sealed class MainForm : Form
         {
             cts.Dispose();
             sendCts = null;
+            activeSender = null;
             sendButton.Text = "Iniciar transmissor";
             autoBox.Enabled = true;
             hostBox.Enabled = !autoBox.Checked;

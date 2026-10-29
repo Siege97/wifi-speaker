@@ -20,4 +20,7 @@ final class Proto {
 
     static final int DISCOVERY_PORT = 50506;
     static final int DISC_MAGIC = 0x57465344; // "WFSD"
+
+    /** Controle (TCP, texto): o transmissor conecta aqui; linhas "VOL n" (n de 0 a 100) nos dois sentidos. */
+    static final int CONTROL_PORT = 50507;
 }

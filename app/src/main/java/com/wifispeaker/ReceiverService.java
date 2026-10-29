@@ -34,6 +34,7 @@ public class ReceiverService extends Service {
     private volatile Socket current;
     private Thread thread;
     private Discovery.Responder responder;
+    private Volume.Server volumeServer;
     private PowerManager.WakeLock wakeLock;
     private WifiManager.WifiLock wifiLock;
     private WifiManager.MulticastLock multicastLock;
@@ -57,6 +58,11 @@ public class ReceiverService extends Service {
             responder = new Discovery.Responder(Build.MANUFACTURER + " " + Build.MODEL);
             responder.start();
 
+            // Volume salvo, e controle para sincronizá-lo com o transmissor conectado.
+            Volume.receiver = Prefs.sp(this).getInt("volume", 100);
+            volumeServer = new Volume.Server(this);
+            volumeServer.start();
+
             thread = new Thread(this::loop, "wifispeaker-receiver");
             thread.start();
         }
@@ -68,6 +74,9 @@ public class ReceiverService extends Service {
         running = false;
         if (responder != null) {
             responder.shutdown();
+        }
+        if (volumeServer != null) {
+            volumeServer.shutdown();
         }
         closeQuietly(server);
         closeQuietly(current);
@@ -175,9 +184,18 @@ public class ReceiverService extends Service {
                 playing = true;
             }
             int queued = 0;
+            int lastVolume = -1;
             byte[] buf = new byte[Proto.CHUNK];
             while (running) {
                 in.readFully(buf);
+
+                // Volume (0 a 100): vale na hora, mesmo com o buffer cheio.
+                int vol = Volume.receiver;
+                if (vol != lastVolume) {
+                    track.setVolume(vol / 100f);
+                    lastVolume = vol;
+                }
+
                 track.write(buf, 0, buf.length);
                 if (!playing) {
                     queued += buf.length;

@@ -19,4 +19,7 @@ static class Proto
 
     public const int DiscoveryPort = 50506;
     public const int DiscMagic = 0x57465344; // "WFSD"
+
+    /// <summary>Controle (TCP, texto): o transmissor conecta aqui; linhas "VOL n" (0 a 100) nos dois sentidos.</summary>
+    public const int ControlPort = 50507;
 }

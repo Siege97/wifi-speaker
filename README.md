@@ -45,6 +45,13 @@ Para encerrar, toque em **Parar** em cada aparelho.
   misturados. O microfone funciona em qualquer versão, inclusive no Android 5.1.1.
 - **Fonte do áudio (Windows):** som do computador ou microfone (à escolha, com seletor de dispositivo).
   A mistura dos dois não existe na versão Windows.
+- **Volume sincronizado:** cada programa tem um slider de volume no receptor (0 a 100%) e outro no
+  transmissor. O volume vale no receptor, que é onde o som toca, e os dois sliders se acompanham:
+  mexer em um move o outro. O do transmissor é um controle remoto e só tem efeito com o transmissor
+  conectado; ao conectar, ele passa a mostrar o volume do receptor. O volume do próprio aparelho
+  (botões do celular, mixer do Windows) continua valendo por cima. Usa uma conexão de controle
+  separada do áudio: se ela falhar, o som toca normalmente. Os dois lados precisam ser da versão que
+  tem este recurso.
 - **Buffer de reprodução (no receptor):** slider de 50 a 1000 ms, com a caixa **Usar buffer padrão**.
   Com o padrão, o som toca assim que chega. Com um valor próprio, o receptor acumula esse tanto de
   áudio antes de começar a tocar: aguenta melhor as falhas do Wi-Fi, mas aumenta o atraso. O valor
@@ -84,6 +91,8 @@ celular não consegue conectar nem descobrir o PC.
 - Cabeçalho de 12 bytes (assinatura `WFSP`, taxa de amostragem, canais) e depois o fluxo de áudio.
 - Descoberta: UDP na porta 50506. Sonda em broadcast (`WFSD` + byte 1); resposta direta
   (`WFSD` + byte 2 + porta TCP + nome do aparelho).
+- Controle de volume: TCP na porta 50507, texto, uma linha por mensagem (`VOL n`, n de 0 a 100), nos
+  dois sentidos. O transmissor conecta depois do áudio; o receptor manda o volume atual ao aceitar.
 - Transmissor Android: `AudioPlaybackCapture` com `MediaProjection` e/ou `AudioRecord` do microfone.
 - Transmissor Windows: WASAPI (loopback ou captura do microfone), via NAudio.
 - Receptor Android: `AudioTrack` em serviço de primeiro plano, com `WakeLock`, `WifiLock` e `MulticastLock`.

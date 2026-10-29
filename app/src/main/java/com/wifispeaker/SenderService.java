@@ -176,6 +176,8 @@ public class SenderService extends Service {
                     out.flush();
                     Status.sender = "Transmitindo para " + s.getInetAddress().getHostAddress()
                             + describe(apps, mic);
+                    // Controle de volume com o receptor (não interfere no áudio se falhar).
+                    Volume.startSenderSide(s.getInetAddress().getHostAddress());
 
                     while (running) {
                         if (apps) {
@@ -198,6 +200,7 @@ public class SenderService extends Service {
                         Status.sender = "Conexão perdida, reconectando...";
                     }
                 } finally {
+                    Volume.closeSenderSide();
                     closeQuietly(s);
                     socket = null;
                 }

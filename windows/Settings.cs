@@ -13,6 +13,9 @@ sealed class Settings
     public int BufferMs { get; set; } = 300;
     public string? LastReceiver { get; set; }
 
+    /// <summary>Volume do receptor deste PC (0 a 100).</summary>
+    public int Volume { get; set; } = 100;
+
     /// <summary>Nome do dispositivo de saida do receptor; null = padrao do Windows.</summary>
     public string? OutputDevice { get; set; }
 

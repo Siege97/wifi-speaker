@@ -13,12 +13,47 @@ sealed class AudioReceiver
 {
     private readonly Action<string> status;
     private readonly Func<int> bufferMs;
+    private readonly Func<string?> outputDevice;
 
     /// <param name="bufferMs">Buffer de reproducao em ms; 0 = padrao (toca na hora).</param>
-    public AudioReceiver(Action<string> status, Func<int> bufferMs)
+    /// <param name="outputDevice">Nome do dispositivo de saida; null = padrao do Windows.</param>
+    public AudioReceiver(Action<string> status, Func<int> bufferMs, Func<string?> outputDevice)
     {
         this.status = status;
         this.bufferMs = bufferMs;
+        this.outputDevice = outputDevice;
+    }
+
+    /// <summary>Nomes dos dispositivos de saida de audio (o Windows corta em 31 caracteres).</summary>
+    public static List<string> OutputDevices()
+    {
+        var list = new List<string>();
+        try
+        {
+            for (int i = 0; i < WaveOut.DeviceCount; i++)
+                list.Add(WaveOut.GetCapabilities(i).ProductName);
+        }
+        catch
+        {
+            // sem lista: so o padrao
+        }
+        return list;
+    }
+
+    private static int FindOutput(string name)
+    {
+        try
+        {
+            for (int i = 0; i < WaveOut.DeviceCount; i++)
+            {
+                if (WaveOut.GetCapabilities(i).ProductName == name) return i;
+            }
+        }
+        catch
+        {
+            // cai no padrao
+        }
+        return -1;
     }
 
     public async Task RunAsync(CancellationToken ct)
@@ -118,8 +153,20 @@ sealed class AudioReceiver
         if (rate < 8000 || rate > 192000 || (channels != 1 && channels != 2))
             throw new InvalidDataException("formato de audio invalido");
 
+        // Dispositivo de saida escolhido (ex.: um cabo de audio virtual). Se ele sumiu, toca no padrao.
+        string? wanted = outputDevice();
+        int deviceNumber = -1;
+        string note = "";
+        if (!string.IsNullOrEmpty(wanted))
+        {
+            deviceNumber = FindOutput(wanted);
+            note = deviceNumber >= 0
+                ? $" (saida: {wanted})"
+                : $" (saida \"{wanted}\" nao encontrada, usando a padrao)";
+        }
+
         var remote = (client.Client.RemoteEndPoint as IPEndPoint)?.Address;
-        status("Conectado a " + remote);
+        status("Conectado a " + remote + note);
 
         var format = new WaveFormat(rate, 16, channels);
 
@@ -132,7 +179,7 @@ sealed class AudioReceiver
             DiscardOnBufferOverflow = true,
         };
 
-        using var output = new WaveOutEvent { DesiredLatency = 150 };
+        using var output = new WaveOutEvent { DesiredLatency = 150, DeviceNumber = deviceNumber };
         output.Init(buffer);
 
         bool started = false;

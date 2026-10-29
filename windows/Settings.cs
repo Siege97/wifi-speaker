@@ -13,6 +13,9 @@ sealed class Settings
     public int BufferMs { get; set; } = 300;
     public string? LastReceiver { get; set; }
 
+    /// <summary>Nome do dispositivo de saida do receptor; null = padrao do Windows.</summary>
+    public string? OutputDevice { get; set; }
+
     private static string FilePath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "WifiSpeaker", "settings.json");
 

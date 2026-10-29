@@ -12,10 +12,16 @@ sealed class MainForm : Form
     /// <summary>Buffer de reproducao em ms lido pelo receptor; 0 = padrao.</summary>
     private volatile int currentBufferMs;
 
+    /// <summary>Dispositivo de saida escolhido para o receptor; null = padrao do Windows.</summary>
+    private volatile string? currentOutput;
+
+    private const string DefaultOutputLabel = "Padrao do Windows";
+
     // --- Receptor
     private readonly Button recvButton = new() { Text = "Iniciar receptor", AutoSize = true };
     private readonly Label recvStatus = new() { Text = "Estado: Parado", AutoSize = true, MaximumSize = new Size(440, 0) };
     private readonly Label recvIps = new() { AutoSize = true, MaximumSize = new Size(440, 0) };
+    private readonly ComboBox outBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 400 };
     private readonly CheckBox bufferDefault = new() { Text = "Usar buffer padrao", AutoSize = true };
     private readonly Label bufferLabel = new() { AutoSize = true };
     private readonly TrackBar bufferTrack = new()
@@ -76,6 +82,10 @@ sealed class MainForm : Form
         panel.Controls.Add(recvButton);
         panel.Controls.Add(recvStatus);
         panel.Controls.Add(recvIps);
+        panel.Controls.Add(Lbl("Saida de audio (onde o som e tocado). Para usar como microfone em outros "
+            + "programas, escolha o \"CABLE Input\" de um cabo de audio virtual (ex.: VB-Cable). "
+            + "Vale a partir da proxima conexao."));
+        panel.Controls.Add(outBox);
         panel.Controls.Add(bufferDefault);
         panel.Controls.Add(bufferLabel);
         panel.Controls.Add(bufferTrack);
@@ -99,6 +109,9 @@ sealed class MainForm : Form
         // ---------------------------------------------------------------- estado salvo
         LoadMics();
 
+        currentOutput = settings.OutputDevice;
+        RefreshOutputs();
+
         bufferTrack.Value = Math.Clamp(settings.BufferMs, BufMin, BufMax);
         bufferDefault.Checked = settings.BufferDefault;
         UpdateBufferUi();
@@ -111,6 +124,12 @@ sealed class MainForm : Form
         micBox.Enabled = rbMic.Checked;
 
         // ---------------------------------------------------------------- eventos
+        outBox.DropDown += (_, _) => RefreshOutputs(); // pega dispositivos instalados depois
+        outBox.SelectionChangeCommitted += (_, _) =>
+        {
+            currentOutput = outBox.SelectedIndex <= 0 ? null : outBox.SelectedItem as string;
+            settings.OutputDevice = currentOutput;
+        };
         bufferDefault.CheckedChanged += (_, _) => UpdateBufferUi();
         bufferTrack.ValueChanged += (_, _) =>
         {
@@ -176,6 +195,24 @@ sealed class MainForm : Form
         micBox.SelectedIndex = index;
     }
 
+    /// <summary>Recarrega a lista de saidas, mantendo a escolha atual.</summary>
+    private void RefreshOutputs()
+    {
+        string? keep = currentOutput;
+
+        outBox.Items.Clear();
+        outBox.Items.Add(DefaultOutputLabel);
+        foreach (var name in AudioReceiver.OutputDevices())
+            outBox.Items.Add(name);
+
+        // Se o dispositivo salvo nao esta na lista agora, mostra o nome mesmo assim: o receptor avisa
+        // na conexao e toca no padrao, em vez de a escolha mudar sozinha.
+        if (keep != null && !outBox.Items.Contains(keep))
+            outBox.Items.Add(keep);
+
+        outBox.SelectedItem = keep ?? DefaultOutputLabel;
+    }
+
     private void UpdateBufferUi()
     {
         bool def = bufferDefault.Checked;
@@ -210,7 +247,10 @@ sealed class MainForm : Form
         string final = "Parado";
         try
         {
-            var receiver = new AudioReceiver(m => Ui(() => recvStatus.Text = "Estado: " + m), () => currentBufferMs);
+            var receiver = new AudioReceiver(
+                m => Ui(() => recvStatus.Text = "Estado: " + m),
+                () => currentBufferMs,
+                () => currentOutput);
             await Task.Run(() => receiver.RunAsync(cts.Token));
         }
         catch (Exception ex)

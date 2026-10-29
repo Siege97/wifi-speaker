@@ -55,6 +55,13 @@ Para encerrar, toque em **Parar** em cada aparelho.
 A pasta `windows/` tem a versão para PC, com os mesmos dois modos e o mesmo protocolo,
 então ela conversa com o app do celular, nas duas direções.
 
+**Usar o microfone do celular como microfone do Windows:** o programa só toca o som recebido numa
+saída de áudio; ele não cria um dispositivo de entrada. Para isso, instale um cabo de áudio virtual
+(por exemplo o VB-Cable), escolha o **CABLE Input** em *Saída de áudio* no receptor e, no programa de
+gravação (Audacity, OBS, Zoom...), selecione o **CABLE Output** como microfone. Só o som do celular vai
+para o cabo; o resto do PC continua nas caixas. A lista de saídas se atualiza ao abri-la, e a escolha
+fica salva. O Windows limita os nomes a 31 caracteres nessa lista (ex.: "CABLE Input (VB-Audio Virtual C").
+
 Para obter o `.exe`: aba **Actions** > **Build Windows** > execução mais recente >
 artefato **wifi-speaker-windows**. Ele roda sem instalar nada. Na primeira vez que
 iniciar o receptor, permita o acesso no firewall do Windows (redes privadas), senão o
